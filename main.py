@@ -150,6 +150,15 @@ def process_irrigation_alert(uid, logs, lang):
                     save_notification(uid, title, msg, "irrigation", lang)
                     send_push(uid, title, msg)
 
+@app.get("/test/{uid}")
+def test_notification(uid: str):
+    title = "Test Notification"
+    msg = "If you see this in Firebase, backend works."
+
+    save_notification(uid, title, msg, "test", "en")
+    send_push(uid, title, msg)
+
+    return {"status": "Notification test sent"}
 
 # --------------------------
 #  MAIN SCHEDULER ENDPOINT
@@ -169,4 +178,5 @@ def run_alerts():
         process_irrigation_alert(uid, logs, lang)
 
     return {"status": "alerts processed successfully!"}
+
 
