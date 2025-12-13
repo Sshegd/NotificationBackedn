@@ -1,0 +1,15 @@
+name: Run Alerts Scheduler
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # Runs every hour
+  workflow_dispatch:
+
+jobs:
+  call-backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Render Backend
+        run: |
+          curl -X GET "https://notificationbackend-nihd.onrender.com/run-alerts"
