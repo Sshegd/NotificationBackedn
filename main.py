@@ -1,204 +1,166 @@
 from fastapi import FastAPI
 import firebase_admin
-import os, json
+import os, json, requests
 from firebase_admin import credentials, db, messaging
-import requests
 from datetime import datetime, timedelta
 
 app = FastAPI()
 
 # ----------------------------------------------------------
-# 1. LOAD ENV VARIABLES FROM RENDER
+# LOAD ENV VARIABLES
 # ----------------------------------------------------------
-
-firebase_credentials_str = os.environ["FIREBASE_CREDENTIALS"]
-firebase_credentials = json.loads(firebase_credentials_str)
-
-databaseURL = os.environ["FIREBASE_DB_URL"]
+cred_json = json.loads(os.environ["FIREBASE_CREDENTIALS"])
+DB_URL = os.environ["FIREBASE_DB_URL"]
 WEATHER_API_KEY = os.environ["WEATHER_API_KEY"]
 WEATHER_API_URL = os.environ["WEATHER_API_URL"]
 
 # ----------------------------------------------------------
-# 2. INITIALIZE FIREBASE USING ENV VARIABLES
+# FIREBASE INIT
 # ----------------------------------------------------------
-
-cred = credentials.Certificate(firebase_credentials)
-
 if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred, {
-        "databaseURL": databaseURL
-    })
-
-
-# ----------------------------------------------------------
-# SEND PUSH NOTIFICATION TO USER
-# ----------------------------------------------------------
-def send_push(uid: str, title: str, body: str):
-    token = db.reference(f"Users/{uid}/fcmToken").get()
-
-    if not token:
-        print(f"No FCM token for user {uid}")
-        return
-
-    message = messaging.Message(
-        notification=messaging.Notification(title=title, body=body),
-        token=token
+    firebase_admin.initialize_app(
+        credentials.Certificate(cred_json),
+        {"databaseURL": DB_URL}
     )
 
-    try:
-        messaging.send(message)
-    except Exception as e:
-        print(f"Push error for {uid}: {e}")
-
-
 # ----------------------------------------------------------
-# SAVE NOTIFICATION IN FIREBASE
+# COMMON FUNCTIONS
 # ----------------------------------------------------------
-def save_notification(uid, title, message, notif_type, lang):
-    notif_ref = db.reference(f"Users/{uid}/notifications").push()
-    
-    notif_data = {
+def save_notification(uid, title, msg, ntype, lang):
+    db.reference(f"Users/{uid}/notifications").push().set({
         "title": title,
-        "message": message,
-        "timestamp": int(datetime.now().timestamp() * 1000),
-        "type": notif_type,
+        "message": msg,
+        "type": ntype,
         "lang": lang,
+        "timestamp": int(datetime.now().timestamp() * 1000),
         "read": False
-    }
+    })
 
-    notif_ref.set(notif_data)
-    print(f"Saved notification for {uid}: {title}")
+def send_push(uid, title, msg):
+    token = db.reference(f"Users/{uid}/fcmToken").get()
+    if not token:
+        return
+    messaging.send(
+        messaging.Message(
+            notification=messaging.Notification(title=title, body=msg),
+            token=token
+        )
+    )
 
+def notify(uid, title, msg, ntype, lang):
+    save_notification(uid, title, msg, ntype, lang)
+    send_push(uid, title, msg)
 
 # ----------------------------------------------------------
-# WEATHER FETCH FUNCTION
+# WEATHER SERVICE
 # ----------------------------------------------------------
 def get_weather(city):
-    url = f"{WEATHER_API_URL}?q={city}&appid={WEATHER_API_KEY}&units=metric"
-    res = requests.get(url).json()
-
-    temp = res["main"]["temp"]
-    humidity = res["main"]["humidity"]
-    rain_chance = 80 if "rain" in res else 20
-    return temp, humidity, rain_chance
-
-
-# ----------------------------------------------------------
-# WEATHER ALERT ENGINE
-# ----------------------------------------------------------
-def process_weather_alert(uid, lang, city):
-    try:
-        temp, humidity, rain = get_weather(city)
-    except:
-        print(f"Weather fetch failed for {uid}")
-        return
-
-    alerts = []
-
-    if rain > 60:
-        alerts.append({
-            "en": "🌧 Rain expected soon. Protect your crops.",
-            "kn": "🌧 ಶೀಘ್ರದಲ್ಲೇ ಮಳೆ ಸಾಧ್ಯತೆ. ನಿಮ್ಮ ಬೆಳೆಗಳನ್ನು ರಕ್ಷಿಸಿ."
-        })
-
-    if temp > 34:
-        alerts.append({
-            "en": "🔥 High temperature! Provide irrigation.",
-            "kn": "🔥 ಹೆಚ್ಚು ತಾಪಮಾನ! ನೀರಾವರಿ ನೀಡಿ."
-        })
-
-    if humidity > 75:
-        alerts.append({
-            "en": "🐛 High pest risk due to humidity.",
-            "kn": "🐛 ಆರ್ದ್ರತೆಯಿಂದ ಕೀಟದ ಅಪಾಯ."
-        })
-
-    for alert in alerts:
-        message = alert[lang]
-        title = "Weather Alert" if lang == "en" else "ಹವಾಮಾನ ಎಚ್ಚರಿಕೆ"
-
-        save_notification(uid, title, message, "weather", lang)
-        send_push(uid, title, message)
-
+    res = requests.get(
+        f"{WEATHER_API_URL}?q={city}&appid={WEATHER_API_KEY}&units=metric"
+    ).json()
+    return {
+        "temp": res["main"]["temp"],
+        "humidity": res["main"]["humidity"],
+        "rain": "rain" in res
+    }
 
 # ----------------------------------------------------------
-# FERTILIZER REMINDER ENGINE
+# WEATHER BASED ALERTS
 # ----------------------------------------------------------
-def process_fertilizer_alert(uid, logs, lang):
-    if not logs:
-        return
+def weather_alerts(uid, lang, city):
+    w = get_weather(city)
 
-    for cropKey in logs:
-        for logId, entry in logs[cropKey].items():
+    if w["temp"] > 35:
+        notify(uid,
+            "Water Alert" if lang == "en" else "ನೀರಾವರಿ ಎಚ್ಚರಿಕೆ",
+            "High temperature – irrigate crops today" if lang == "en"
+            else "ಹೆಚ್ಚು ತಾಪಮಾನ – ಇಂದು ನೀರಾವರಿ ನೀಡಿ",
+            "weather", lang)
+
+    if not w["rain"] and w["temp"] < 32:
+        notify(uid,
+            "Spray Advisory" if lang == "en" else "ಸಿಂಪಡಣೆ ಸಲಹೆ",
+            "Sunny weather – you can spray pesticide today" if lang == "en"
+            else "ಸೂರ್ಯಪ್ರಕಾಶ – ಇಂದು ಕೀಟನಾಶಕ ಸಿಂಪಡಿಸಬಹುದು",
+            "weather", lang)
+
+    if w["humidity"] > 75:
+        notify(uid,
+            "Pest Risk Alert" if lang == "en" else "ಕೀಟ ಅಪಾಯ ಎಚ್ಚರಿಕೆ",
+            "High humidity – pest and disease risk" if lang == "en"
+            else "ಹೆಚ್ಚು ಆರ್ದ್ರತೆ – ಕೀಟ ಮತ್ತು ರೋಗ ಅಪಾಯ",
+            "pest", lang)
+
+# ----------------------------------------------------------
+# ACTIVITY BASED ALERTS
+# ----------------------------------------------------------
+def activity_alerts(uid, logs, lang):
+    today = datetime.now().date()
+
+    for crop in logs.values():
+        for entry in crop.values():
+
+            # Fertilizer reminder
             if entry.get("subActivity") == "nutrient_management":
                 app = entry["applications"][0]
+                due = datetime.strptime(
+                    app["applicationDate"], "%Y-%m-%d"
+                ).date() + timedelta(days=app["gapDays"])
 
-                last_date = datetime.strptime(app["applicationDate"], "%Y-%m-%d")
-                next_date = last_date + timedelta(days=app["gapDays"])
+                if today >= due:
+                    notify(uid,
+                        "Fertilizer Reminder" if lang == "en" else "ಗೊಬ್ಬರ ಜ್ಞಾಪನೆ",
+                        "Time for next fertilizer dose" if lang == "en"
+                        else "ಮುಂದಿನ ಗೊಬ್ಬರದ ಡೋಸ್ ಸಮಯ ಬಂದಿದೆ",
+                        "fertilizer", lang)
 
-                if datetime.now().date() >= next_date.date():
-                    title = "Fertilizer Alert" if lang == "en" else "ಗೊಬ್ಬರ ಎಚ್ಚರಿಕೆ"
-                    msg = "Time for the next fertilizer dose." if lang == "en" else "ಮುಂದಿನ ಗೊಬ್ಬರದ ಡೋಸ್ ಸಮಯ ಬಂದಿದೆ."
-
-                    save_notification(uid, title, msg, "fertilizer", lang)
-                    send_push(uid, title, msg)
-
-
-# ----------------------------------------------------------
-# IRRIGATION REMINDER ENGINE
-# ----------------------------------------------------------
-def process_irrigation_alert(uid, logs, lang):
-    if not logs:
-        return
-
-    for cropKey in logs:
-        cropLogs = logs[cropKey]
-
-        for logId in cropLogs:
-            entry = cropLogs[logId]
-
+            # Water reminder
             if entry.get("subActivity") == "water_management":
-                last = datetime.strptime(entry["lastIrrigationDate"], "%Y-%m-%d")
-                next_irrigation = last + timedelta(days=entry["frequencyDays"])
+                due = datetime.strptime(
+                    entry["lastIrrigationDate"], "%Y-%m-%d"
+                ).date() + timedelta(days=entry["frequencyDays"])
 
-                if datetime.now().date() >= next_irrigation.date():
-                    msg = "Irrigation needed today." if lang == "en" else "ಇಂದು ನೀರಾವರಿ ಅಗತ್ಯವಿದೆ."
-                    title = "Irrigation Alert" if lang == "en" else "ನೀರಾವರಿ ಎಚ್ಚರಿಕೆ"
+                if today >= due:
+                    notify(uid,
+                        "Irrigation Reminder" if lang == "en" else "ನೀರಾವರಿ ಜ್ಞಾಪನೆ",
+                        "Irrigation required today" if lang == "en"
+                        else "ಇಂದು ನೀರಾವರಿ ಅಗತ್ಯವಿದೆ",
+                        "water", lang)
 
-                    save_notification(uid, title, msg, "irrigation", lang)
-                    send_push(uid, title, msg)
+            # Pesticide schedule
+            if entry.get("subActivity") == "pest_management":
+                due = datetime.strptime(
+                    entry["lastSprayDate"], "%Y-%m-%d"
+                ).date() + timedelta(days=entry["sprayInterval"])
 
+                if today >= due:
+                    notify(uid,
+                        "Pesticide Reminder" if lang == "en" else "ಕೀಟನಾಶಕ ಜ್ಞಾಪನೆ",
+                        "Time for pesticide spray" if lang == "en"
+                        else "ಕೀಟನಾಶಕ ಸಿಂಪಡಣೆ ಸಮಯ",
+                        "pest", lang)
+
+# ----------------------------------------------------------
+# MAIN SCHEDULER
+# ----------------------------------------------------------
+@app.get("/run-alerts")
+def run_alerts():
+    users = db.reference("Users").get()
+
+    for uid, user in users.items():
+        lang = user.get("preferredLanguage", "en")
+        city = user.get("location", "Sirsi")
+        logs = user.get("farmActivityLogs", {})
+
+        weather_alerts(uid, lang, city)
+        activity_alerts(uid, logs, lang)
+
+    return {"status": "alerts sent"}
 
 # ----------------------------------------------------------
 # TEST ENDPOINT
 # ----------------------------------------------------------
 @app.get("/test/{uid}")
-def test_notification(uid: str):
-    title = "Test Notification"
-    msg = "If you see this in Firebase, backend is working."
-
-    save_notification(uid, title, msg, "test", "en")
-    send_push(uid, title, msg)
-
-    return {"status": "Notification test sent"}
-
-
-# ----------------------------------------------------------
-# MAIN SCHEDULER ENDPOINT
-# ----------------------------------------------------------
-@app.get("/run-alerts")
-def run_alerts():
-
-    users = db.reference("Users").get()
-
-    for uid, user in users.items():
-
-        lang = user.get("preferredLanguage", "en")
-        city = user.get("location", "Sirsi")
-        logs = user.get("farmActivityLogs", {})
-
-        process_weather_alert(uid, lang, city)
-        process_fertilizer_alert(uid, logs, lang)
-        process_irrigation_alert(uid, logs, lang)
-
-    return {"status": "alerts processed successfully!"}
+def test(uid: str):
+    notify(uid, "Test", "Backend working successfully", "test", "en")
+    return {"status": "ok"}
